@@ -44,8 +44,8 @@
   (let [parents (get line :parent-uuids)]
     (map (fn [single-parent]
       (as-> line $
-        (concat $ [single-parent])
-        (map $ [:genetic-operators :uuid])
+        (assoc $ :single-parent single-parent)
+        (map $ [:single-parent :genetic-operators :uuid])
         (concat $ ["PARENT_OF"])
         (apply safe-println csv-file $))) parents)
   1))
