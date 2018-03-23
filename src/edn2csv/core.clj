@@ -4,99 +4,134 @@
            [clojure.java.io :as io]
            [clojure.pprint :as pp]
            [iota]
-           [me.raynes.fs :as fs])
+           [me.raynes.fs :as fs]
+           [clj-uuid :as uuid])
   (:gen-class))
 
-; The header line for the Individuals CSV file
+;;;; HEADER LINES FOR CSV FILES ;;;;
+; for node files
 (def individuals-header-line "UUID:ID(Individual),Generation:int,Location:int,:LABEL")
+(def semantics-header-line "UUID:ID(Semantics),TotalError:int,:LABEL")
+(def errors-header-line "UUID:ID(Error),ErrorValue:int,Position:int,:LABEL")
+; for edge files
+(def parent-of-edges-header-line ":START_ID(Individual),GeneticOperator,:END_ID(Individual),:TYPE")
+(def individual-semantics-header-line ":START_ID(Individual),:END_ID(Semantics),:TYPE")
+(def semantics-error-header-line ":START_ID(Semantics),:END_ID(Error),:TYPE") ; in the README, START_ID has no colon : here. I inserted it because all the other header lines have one, and I figured it's a typo.
 
-; Ignores (i.e., returns nil) any EDN entries that don't have the
-; 'clojure/individual tag.
 (defn individual-reader
     [t v]
     (when (= t 'clojush/individual) v))
 
-; I got this from http://yellerapp.com/posts/2014-12-11-14-race-condition-in-clojure-println.html
-; It prints in a way that avoids weird interleaving of lines and items.
-; In several ways it would be better to use a CSV library like
-; clojure.data.csv, but that won't (as written) avoid the interleaving
-; problems, so I'm sticking with this approach for now.
+; nifty function I grabbed off the interwebs for mapping a function across only
+; the values of a map. Returns map with old keys, new values.
+; http://blog.jayfields.com/2011/08/clojure-apply-function-to-each-value-of.html
+(defn map-vals
+  [m f & args]
+  (reduce (fn [r [k v]] (assoc r k (apply f v args))) {} m))
+
 (defn safe-println [output-stream & more]
   (.write output-stream (str (clojure.string/join "," more) "\n")))
 
-; This prints out the relevant fields to the CSV filter
-; and then returns 1 so we can count up how many individuals we processed.
-; (The counting isn't strictly necessary, but it gives us something to
-; fold together after we map this across the individuals; otherwise we'd
-; just end up with a big list of nil's.)
-(defn print-individual-to-csv
-  [csv-file line]
-  (as-> line $
-    (map $ [:uuid :generation :location])
-    (concat $ ["Individual"])
-    (apply safe-println csv-file $))
-  1)
+;;;; BEGIN CODE FOR PROCESSING & WRITING INDIVIDUALS ;;;;
 
-(defn edn->csv-sequential [edn-file csv-file]
-  (with-open [out-file (io/writer csv-file)]
-    (safe-println out-file individuals-header-line)
-    (->>
-      (line-seq (io/reader edn-file))
-      ; Skip the first line because it's not an individual
-      (drop 1)
-      (map (partial edn/read-string {:default individual-reader}))
-      (map (partial print-individual-to-csv out-file))
-      (reduce +)
-      )))
+; lists of lines to be printed to csv files
+(def individuals-result (atom ()))
+(def semantics-result (atom hash-map))
+(def errors-result (atom ()))
+(def parent-of-result (atom ()))
+(def individual-semantics-result (atom ()))
+(def semantics-error-result (atom()))
 
-(defn edn->csv-pmap [edn-file csv-file]
-  (with-open [out-file (io/writer csv-file)]
-    (safe-println out-file individuals-header-line)
-    (->>
-      (line-seq (io/reader edn-file))
-      ; Skip the first line because it's not an individual
-      (drop 1)
-      (pmap (fn [line]
-        (print-individual-to-csv out-file (edn/read-string {:default individual-reader} line))
-        1))
-      count
-      )))
+(defn dump-to-CSVs
+  [csv-filenames]
+  (with-open [individuals-out (io/writer (get csv-filenames :individuals))]
+    (safe-println individuals-out individuals-header-line)
+    (r/map (partial safe-println individuals-out) @individuals-result)))
 
-(defn edn->csv-reducers [edn-file csv-file]
-  (with-open [out-file (io/writer csv-file)]
-    (safe-println out-file individuals-header-line)
-    (->>
-      (iota/seq edn-file)
-      (r/map (partial edn/read-string {:default individual-reader}))
-      ; This eliminates empty (nil) lines, which result whenever
-      ; a line isn't a 'clojush/individual. That only happens on
-      ; the first line, which is a 'clojush/run, but we still need
-      ; to catch it. We could do that with `r/drop`, but that
-      ; totally kills the parallelism. :-(
-      (r/filter identity)
-      (r/map (partial print-individual-to-csv out-file))
-      (r/fold +)
-      )))
+(defn process-individual
+  [line]
+  ; construct line for Individuals.csv
+  (swap! individuals-result conj
+    (as-> line $
+      (doall (map $ [:uuid :generation :location])
+      (concat $ ["Individual"]))))
+      ;(swap! individuals-result conj $))
 
-(defn build-individual-csv-filename
-  [edn-filename strategy]
-  (str (fs/parent edn-filename)
-       "/"
-       (fs/base-name edn-filename ".edn")
-       (if strategy
-         (str "_" strategy)
-         "_sequential")
-       "_Individuals.csv"))
+  ; construct line for Semantics.csv
+  (swap! semantics-result assoc (line :errors)
+    (as-> () $
+      (concat $ uuid/v1)
+      (concat $ (line :total-error))
+      (concat $ ["Semantics"])))
+
+  ; construct line for Errors.csv
+  ;(map (fn [error-vector]
+  (let [error-vector (line :errors)]
+    (map (fn [error-value]
+            (swap! errors-result
+              (as-> () $
+                (concat $ uuid/v1)
+                (concat $ error-value)
+                (concat $ (.indexOf error-vector error-value))
+                (concat ["Error"])))) error-vector))
+                ;@semantics-result)
+
+  ; construct line for ParentOf_edges.csv
+  (let [parents (get line :parent-uuids)]
+    (swap! parent-of-result conj
+      (doall (map (fn [parent]
+                (as-> () $
+                  (concat $ (line :uuid))
+                  (concat $ (line :genetic-operators))
+                  (concat $ parent)
+                  (concat $ ["PARENT_OF"]))) parents))))
+
+  ; construct line for Individual_Semantics_edges.csv
+  (swap! individual-semantics-result conj
+    (as-> () $
+      (concat $ (line :uuid))
+      (concat $ (first (@semantics-result (line :errors))))
+      (concat $ ["HAS_SEMANTICS"])))
+
+  ; construct line for Semantics_Error_edges.csv
+  (map (fn [error-vector]
+          ()))
+  (swap! semantics-error-result conj
+    (as-> () $
+      (concat $ (first (@semantics-result (line :errors))))
+      (concat $ (first (@errors-result )))
+
+  (let [error-vector (line :errors)]
+    (map (fn [error-value]
+            (swap! semantics-error-result conj
+              (as-> () $
+                (concat $ (first (@semantics-result error-vector)))
+                (concat $ (first (@errors-result error-value))) ; this doesn't seem right -- won't there be many items in the errors-result atom that will have the same error-value?
+                (concat ["HAS_ERROR"])))) error-vector))
+                ;@semantics-result)
+
+)
+
+(defn build-csv-filenames
+  [edn-filename]
+  (let [csv-file-postfixes {:individuals "_Individuals.csv", :semantics "_Semantics.csv",
+                            :errors "_Errors.csv", :parent-of "_parent-of_edges.csv",
+                            :individuals-semantics "_Individual_Semantics_edges.csv",
+                            :semantics-error "_Semantics_Error_edges.csv"},
+        edn-file-base-name (str (fs/parent edn-filename) "/"
+                           (fs/base-name edn-filename ".edn"))]
+    (map-vals csv-file-postfixes (partial str edn-file-base-name))))
+
+(defn read-edn
+  [edn-filename]
+  (->>
+    (iota/seq edn-filename)
+    (r/map (partial edn/read-string {:default individual-reader}))
+    (r/filter identity)))
 
 (defn -main
-  [edn-filename & [strategy]]
-  (let [individual-csv-file (build-individual-csv-filename edn-filename strategy)]
-    (time
-      (condp = strategy
-        "sequential" (edn->csv-sequential edn-filename individual-csv-file)
-        "pmap" (edn->csv-pmap edn-filename individual-csv-file)
-        "reducers" (edn->csv-reducers edn-filename individual-csv-file)
-        (edn->csv-sequential edn-filename individual-csv-file))))
-  ; Necessary to get threads spun up by `pmap` to shutdown so you get
-  ; your prompt back right away when using `lein run`.
-  (shutdown-agents))
+  [edn-filename]
+  (let [edn-seq (read-edn edn-filename), csv-filenames (build-csv-filenames edn-filename)]
+    (r/map process-individual edn-seq)
+    (dump-to-CSVs csv-filenames)
+(shutdown-agents)))
