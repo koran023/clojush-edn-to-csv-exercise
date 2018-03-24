@@ -32,8 +32,6 @@
 (defn safe-println [output-stream & more]
   (.write output-stream (str (clojure.string/join "," more) "\n")))
 
-;;;; BEGIN CODE FOR PROCESSING & WRITING INDIVIDUALS ;;;;
-
 ; lists of lines to be printed to csv files
 (def individuals-result (atom ()))
 (def semantics-result (atom hash-map))
@@ -42,29 +40,53 @@
 (def individual-semantics-result (atom ()))
 (def semantics-error-result (atom()))
 
+; hulking function that opens 6 files, prints a header line in each of them, and dumps the result atoms into their respective files
 (defn dump-to-CSVs
   [csv-filenames]
-  (with-open [individuals-out (io/writer (get csv-filenames :individuals))]
-    (safe-println individuals-out individuals-header-line)
-    (r/map (partial safe-println individuals-out) @individuals-result)))
+  (with-open [individuals-out (io/writer (get csv-filenames :individuals)),
+              semantics-out (io/writer (get csv-filenames :semantics)),
+              errors-out (io/writer (get csv-filenames :errors)),
+              parent-of-out (io/writer (get csv-filenames :parent-of)),
+              individuals-semantics-out (io/writer (get csv-filenames :individuals-semantics)),
+              semantics-error-out (io/writer (get csv-filenames :semantics-error))]
+    ; print all header lines
+    (safe-println individuals-out           individuals-header-line)
+    (safe-println semantics-out             semantics-header-line)
+    (safe-println errors-out                errors-header-line)
+    (safe-println parent-of-out             parent-of-edges-header-line)
+    (safe-println individuals-semantics-out individual-semantics-header-line)
+    (safe-println semantics-error-out       semantics-error-header-line)
+    ; dump atoms containing processed lines to their respective CSV files
+    (r/map (partial safe-println individuals-out)               @individuals-result)
+    (r/map (partial safe-println semantics-out)                 @semantics-result)
+    (r/map (partial safe-println errors-out)                    @errors-result)
+    (r/map (partial safe-println parent-of-out)                 @parent-of-result)
+    (r/map (partial safe-println individuals-semantics-out)     @individual-semantics-result)
+    (r/map (partial safe-println semantics-error-out)           @semantics-error-result)))
 
-(defn process-individual
+;;;; LINE PROCESSING FUNCTIONS ;;;;
+
+; construct line for Individuals.csv
+(defn make-individuals-line
   [line]
-  ; construct line for Individuals.csv
   (swap! individuals-result conj
     (as-> line $
       (doall (map $ [:uuid :generation :location])
-      (concat $ ["Individual"]))))
+      (concat $ ["Individual"])))))
       ;(swap! individuals-result conj $))
 
-  ; construct line for Semantics.csv
+; construct line for Semantics.csv
+(defn make-semantics-line
+  [line]
   (swap! semantics-result assoc (line :errors)
     (as-> () $
       (concat $ uuid/v1)
       (concat $ (line :total-error))
-      (concat $ ["Semantics"])))
+      (concat $ ["Semantics"]))))
 
-  ; construct line for Errors.csv
+; construct line for Errors.csv
+(defn make-errors-line
+  [line]
   ;(map (fn [error-vector]
   (let [error-vector (line :errors)]
     (map (fn [error-value]
@@ -73,10 +95,13 @@
                 (concat $ uuid/v1)
                 (concat $ error-value)
                 (concat $ (.indexOf error-vector error-value))
-                (concat ["Error"])))) error-vector))
+                (concat ["Error"])))) error-vector)))
                 ;@semantics-result)
+    
+; construct line for ParentOf_edges.csv
+(defn make-parent-of-line
+  [line]
 
-  ; construct line for ParentOf_edges.csv
   (let [parents (get line :parent-uuids)]
     (swap! parent-of-result conj
       (doall (map (fn [parent]
@@ -84,32 +109,41 @@
                   (concat $ (line :uuid))
                   (concat $ (line :genetic-operators))
                   (concat $ parent)
-                  (concat $ ["PARENT_OF"]))) parents))))
+                  (concat $ ["PARENT_OF"]))) parents)))))
+    
+; construct line for Individual_Semantics_edges.csv
+(defn make-individuals-semantics-line
+  [line]
 
-  ; construct line for Individual_Semantics_edges.csv
   (swap! individual-semantics-result conj
     (as-> () $
       (concat $ (line :uuid))
       (concat $ (first (@semantics-result (line :errors))))
-      (concat $ ["HAS_SEMANTICS"])))
-
-  ; construct line for Semantics_Error_edges.csv
-  (map (fn [error-vector]
-          ()))
-  (swap! semantics-error-result conj
-    (as-> () $
-      (concat $ (first (@semantics-result (line :errors))))
-      (concat $ (first (@errors-result )))
-
+      (concat $ ["HAS_SEMANTICS"]))))
+    
+; construct line for Semantics_Error_edges.csv
+(defn make-semantics-error-line
+  [line]
   (let [error-vector (line :errors)]
     (map (fn [error-value]
             (swap! semantics-error-result conj
               (as-> () $
                 (concat $ (first (@semantics-result error-vector)))
                 (concat $ (first (@errors-result error-value))) ; this doesn't seem right -- won't there be many items in the errors-result atom that will have the same error-value?
-                (concat ["HAS_ERROR"])))) error-vector))
+                (concat ["HAS_ERROR"])))) error-vector)))
                 ;@semantics-result)
+                
+;;;; END LINE PROCESSING FUNCTIONS ;;;;
 
+; takes an individual line from the edn-seq and processes for each of the 6 needed files
+(defn process-individual
+  [line]
+  (make-individuals-line line)
+  (make-semantics-line line)
+  (make-errors-line line)
+  (make-parent-of-line line)
+  (make-individuals-semantics-line line)
+  (make-semantics-error-line line)
 )
 
 (defn build-csv-filenames
